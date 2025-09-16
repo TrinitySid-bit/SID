@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
 const CONFIG = {
@@ -92,7 +92,7 @@ export default function EnergyCapBTCModel() {
   const [cpiSyncing, setCpiSyncing] = useState(false);
   const [cpiError, setCpiError] = useState<string | null>(null);
 
-  // Live Hashrate (still used in Network heat)
+  // Live Hashrate
   const [hashSyncing, setHashSyncing] = useState(false);
   const [hashErr, setHashErr] = useState<string | null>(null);
   const [hashEhs, setHashEhs] = useState<number | null>(null);
@@ -148,7 +148,7 @@ export default function EnergyCapBTCModel() {
       const dt = data.latest?.dateISO || null;
       setCpiYoYLatest(yoy); setCpiLatestDate(dt);
       if (useLiveCpi && yoy !== null) setCpiPct(Number(yoy.toFixed(2)));
-    } catch (e: any) { setCpiError(String(e?.message || e)); }
+    } catch (e: unknown) { setCpiError(e instanceof Error ? e.message : String(e)); }
     finally { setCpiSyncing(false); }
   }
 
@@ -158,11 +158,11 @@ export default function EnergyCapBTCModel() {
       setHashSyncing(true); setHashErr(null);
       const res = await fetch("/api/hashrate"); const data = await res.json();
       if (!data?.ok) throw new Error(data?.error || "Hashrate API error");
-      setHashEhs(Number(data.hashrate_ehs));
-      setHashDiffT(Number((Number(data.difficulty) / 1e12) || data.difficulty_trillions || 0));
+      setHashEhs(typeof data.hashrate_ehs === "number" ? data.hashrate_ehs : null);
+      setHashDiffT(typeof data.difficulty_trillions === "number" ? data.difficulty_trillions : null);
       setHashSource(String(data.source || "unknown"));
       setHashAsOf(String(data.asOfISO || ""));
-    } catch (e: any) { setHashErr(String(e?.message || e)); }
+    } catch (e: unknown) { setHashErr(e instanceof Error ? e.message : String(e)); }
     finally { setHashSyncing(false); }
   }
 
@@ -173,7 +173,6 @@ export default function EnergyCapBTCModel() {
       const res = await fetch("/api/difficulty"); const data = await res.json();
       if (!data?.ok) throw new Error(data?.error || "Difficulty API error");
 
-      // Prefer explicit trillions if provided
       const diffT = (typeof data?.difficulty_trillions === "number" && isFinite(data.difficulty_trillions))
         ? Number(data.difficulty_trillions)
         : (typeof data?.difficulty === "number" && isFinite(data.difficulty))
@@ -196,7 +195,7 @@ export default function EnergyCapBTCModel() {
       setDiffProgressPct(Number.isFinite(pp) ? pp : null);
       setDiffNextHeight(Number.isFinite(nh) ? nh : null);
       setDiffETAISO(eta || null);
-    } catch (e: any) { setDiffErr(String(e?.message || e)); }
+    } catch (e: unknown) { setDiffErr(e instanceof Error ? e.message : String(e)); }
     finally { setDiffSyncing(false); }
   }
 
@@ -209,7 +208,7 @@ export default function EnergyCapBTCModel() {
       setFeeSharePctLive(Number(data.feeSharePct));
       setFeeSample(Number(data.sampleBlocks));
       setFeeAsOf(String(data.asOfISO || ""));
-    } catch (e: any) { setFeeErr(String(e?.message || e)); }
+    } catch (e: unknown) { setFeeErr(e instanceof Error ? e.message : String(e)); }
     finally { setFeeSyncing(false); }
   }
 
@@ -225,10 +224,7 @@ export default function EnergyCapBTCModel() {
       setElecYoYPct(typeof data?.yoyPct === "number" ? Number(data.yoyPct) : null);
       setElecCAGR5(typeof data?.cagr5Pct === "number" ? Number(data.cagr5Pct) : null);
       setElecCAGR10(typeof data?.cagr10Pct === "number" ? Number(data.cagr10Pct) : null);
-      if (typeof data?.suggestedDriftPct === "number" && (elecDriftPct === 1.0 || elecDriftPct === 0)) {
-        setElecDriftPct(Number(data.suggestedDriftPct.toFixed(2)));
-      }
-    } catch (e: any) { setElecErr(String(e?.message || e)); }
+    } catch (e: unknown) { setElecErr(e instanceof Error ? e.message : String(e)); }
     finally { setElecSyncing(false); }
   }
 
@@ -241,8 +237,8 @@ export default function EnergyCapBTCModel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Model math ---
-  function subsidyOnDate(iso: string) {
+  // --- Model math helpers ---
+  const subsidyOnDate = useCallback((iso: string) => {
     const t = new Date(iso).getTime();
     let current = ALL_ERAS[0].subsidy;
     for (let i = 0; i < ALL_ERAS.length; i++) {
@@ -250,39 +246,48 @@ export default function EnergyCapBTCModel() {
       if (t >= eraStart) current = ALL_ERAS[i].subsidy; else break;
     }
     return current;
-  }
-  function worldElectricityTWh(iso: string) {
+  }, []);
+
+  const worldElectricityTWh = useCallback((iso: string) => {
     const yearsRel = new Date(iso).getUTCFullYear() - 2024;
     return CONFIG.worldElecBaseTWh2024 * Math.pow(1 + CONFIG.worldElecGrowth, yearsRel);
-  }
-  function electricityPriceUSDkWh(iso: string, p: PresetName) {
+  }, []);
+
+  const electricityPriceUSDkWh = useCallback((iso: string, p: PresetName) => {
     const years = yearsBetween(CONFIG.baseDateISO, iso);
     const baseUSD = elecBaseUSDkWh * Math.pow(1 + elecDriftPct/100, years);
     return baseUSD * PRESETS[p].elecPriceMultiplier;
-  }
-  function cpiFactor(iso: string) {
+  }, [elecBaseUSDkWh, elecDriftPct]);
+
+  const cpiFactor = useCallback((iso: string) => {
     const years = yearsBetween(CONFIG.baseDateISO, iso);
     return Math.pow(1 + cpiPct/100, years);
-  }
-  function worldTwhToBtcTwh(worldTWh: number, capSharePct_: number, util: number) {
-    return worldTWh * (capSharePct_/100) * util;
-  }
+  }, [cpiPct]);
 
-  const priceFromEnergyCap = (iso: string, p: PresetName) => {
+  const worldTwhToBtcTwh = (worldTWh: number, capSharePct_: number, util: number) =>
+    worldTWh * (capSharePct_/100) * util;
+
+  const priceFromEnergyCap = useCallback((iso: string, p: PresetName) => {
     const S = subsidyOnDate(iso);
     const S_eff = S * (1 + feesPct/100);
+
     const worldTWh = worldElectricityTWh(iso);
     const btcTWh = worldTwhToBtcTwh(worldTWh, capSharePct, PRESETS[p].capUtilMultiplier);
+
     const energyPerBlockWh = (btcTWh * 1e12) / BLOCKS_PER_YEAR;
     const usdPerKWh = electricityPriceUSDkWh(iso, p);
     const costPerBlockUSD = (energyPerBlockWh/1000) * usdPerKWh * overheadPhi;
+
     const floorPerBTC = costPerBlockUSD / S_eff;
     const fairPerBTC = floorPerBTC * PRESETS[p].markup;
+
     const cpi = cpiFactor(iso);
     const fairPerBTCReal = fairPerBTC / cpi;
-    return { S, S_eff, floorPerBTC, fairPerBTC, fairPerBTCReal };
-  };
 
+    return { S, S_eff, floorPerBTC, fairPerBTC, fairPerBTCReal };
+  }, [capSharePct, feesPct, overheadPhi, subsidyOnDate, worldElectricityTWh, electricityPriceUSDkWh, cpiFactor]);
+
+  // Milestones
   const milestones = useMemo(() => {
     const feeMult = 1 + feesPct/100;
     return THRESHOLDS_BLOCKS.map((t) => {
@@ -302,6 +307,7 @@ export default function EnergyCapBTCModel() {
     });
   }, [stackBTC, feesPct]);
 
+  // Genesis → +25y series
   const seriesFull = useMemo(() => {
     const base = new Date(CONFIG.baseDateISO);
     const baseYear = base.getFullYear();
@@ -316,23 +322,9 @@ export default function EnergyCapBTCModel() {
       out.push({ year: y, price: (showReal ? r.fairPerBTCReal : r.fairPerBTC) });
     }
     return out;
-  }, [preset, showReal, capSharePct, feesPct, elecBaseUSDkWh, elecDriftPct, cpiPct, overheadPhi]);
+  }, [preset, showReal, priceFromEnergyCap]);
 
-  const r = useMemo(() => priceFromEnergyCap(targetISO, preset),
-    [targetISO, preset, capSharePct, feesPct, elecBaseUSDkWh, elecDriftPct, cpiPct, overheadPhi]
-  );
-
-  function resetToDefaults(){
-    setPreset("Base"); setCapSharePct(1.5); setFeesPct(15); setElecBaseUSDkWh(0.06);
-    setElecDriftPct(1.0); setCpiPct(2.5); setOverheadPhi(1.15); setStackBTC(0.01);
-    setYear(2050); setMonth(10); setDay(13); setShowReal(false); setUseLiveCpi(true);
-    setCpiYoYLatest(null); setCpiLatestDate(null); setCpiError(null);
-    setHashEhs(null); setHashDiffT(null); setHashSource(null); setHashAsOf(null); setHashErr(null);
-    setDiffDifficultyRaw(null); setDiffDifficultyT(null); setDiffChangePct(null);
-    setDiffBlocksRem(null); setDiffBlocksInto(null); setDiffProgressPct(null); setDiffNextHeight(null); setDiffETAISO(null); setDiffErr(null);
-    setFeeSharePctLive(null); setFeeSample(null); setFeeAsOf(null); setFeeErr(null);
-    setElecLatestUSD(null); setElecLatestPeriod(null); setElecYoYPct(null); setElecCAGR5(null); setElecCAGR10(null); setElecErr(null);
-  }
+  const r = useMemo(() => priceFromEnergyCap(targetISO, preset), [targetISO, preset, priceFromEnergyCap]);
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 md:p-8 space-y-6">
@@ -392,7 +384,7 @@ export default function EnergyCapBTCModel() {
           </div>
         </div>
 
-        {/* Scenario & Date — stays on top */}
+        {/* Scenario & Date */}
         <div className="card p-4 space-y-3">
           <div>
             <label className="text-sm font-medium">Scenario</label>
@@ -452,9 +444,9 @@ export default function EnergyCapBTCModel() {
         </div>
       </section>
 
-      {/* SECOND ROW — Difficulty (wider), Fees, Electricity, Network heat */}
+      {/* SECOND ROW */}
       <section className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        {/* Difficulty — span 2 cols for room */}
+        {/* Difficulty — span 2 cols */}
         <div className="card p-4 space-y-2 lg:col-span-2">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold">Difficulty retarget (live)</h3>
@@ -468,21 +460,17 @@ export default function EnergyCapBTCModel() {
             <>
               <div className="text-sm">
                 Current difficulty:{" "}
-                <span className="font-semibold">
-                  {diffDifficultyT !== null ? `${diffDifficultyT.toFixed(2)} T` : "—"}
-                </span>
+                <span className="font-semibold">{diffDifficultyT !== null ? `${diffDifficultyT.toFixed(2)} T` : "—"}</span>
               </div>
               <div className="text-xs text-fg-subtle">
                 {diffDifficultyRaw !== null ? `raw: ${diffDifficultyRaw.toExponential(2)}` : ""}
               </div>
               <div className="text-sm">Est. change next retarget: <span className="font-semibold">{diffChangePct !== null ? `${diffChangePct > 0 ? "+" : ""}${diffChangePct.toFixed(2)}%` : "—"}</span></div>
+              <div className="text-xs text-fg-subtle">Epoch progress: {diffProgressPct !== null ? `${diffProgressPct.toFixed(1)}%` : "—"} • Blocks into: {diffBlocksInto ?? "—"} • Remaining: {diffBlocksRem ?? "—"}</div>
               <div className="text-xs text-fg-subtle">Next retarget height: {diffNextHeight ?? "—"}</div>
-              <div className="mt-2">
-                <div className="text-xs text-fg-subtle">Epoch progress: {diffProgressPct !== null ? `${diffProgressPct.toFixed(1)}%` : "—"} • Blocks remaining: {diffBlocksRem ?? "—"}</div>
-                <div className="w-full h-2 bg-panel rounded-full border border-border overflow-hidden mt-1">
-                  <div className="h-2 bg-bitcoin" style={{ width: `${Math.max(0, Math.min(100, diffProgressPct ?? 0))}%` }} />
-                </div>
-                <div className="text-[11px] text-fg-subtle mt-1">Retarget ETA: {diffETAISO ? `${fmtDate(diffETAISO)} ${fmtTime(diffETAISO)}` : "—"}</div>
+              <div className="text-[11px] text-fg-subtle mt-1">Retarget ETA: {diffETAISO ? `${fmtDate(diffETAISO)} ${fmtTime(diffETAISO)}` : "—"}</div>
+              <div className="w-full h-2 bg-panel rounded-full border border-border overflow-hidden mt-1">
+                <div className="h-2 bg-bitcoin" style={{ width: `${Math.max(0, Math.min(100, diffProgressPct ?? 0))}%` }} />
               </div>
             </>
           )}
@@ -512,7 +500,7 @@ export default function EnergyCapBTCModel() {
           )}
         </div>
 
-        {/* Electricity — span 1 col on lg here to fit grid (difficulty took 2) */}
+        {/* Electricity */}
         <div className="card p-4 space-y-2">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold">Electricity price (US Industrial, EIA)</h3>
@@ -547,6 +535,33 @@ export default function EnergyCapBTCModel() {
                   <div className="text-sm font-semibold">{elecCAGR10 !== null ? `${elecCAGR10.toFixed(2)}%` : "—"}</div>
                 </div>
               </div>
+
+              {/* Drift chooser (so elecDriftChoice is used) */}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label className="text-sm font-medium">Use drift from:</label>
+                <select value={elecDriftChoice} onChange={(e)=>setElecDriftChoice(e.target.value as "YoY"|"5y"|"10y")} className="border border-border bg-panel rounded px-2 py-1 text-sm">
+                  <option value="YoY">YoY</option>
+                  <option value="5y">5-year CAGR</option>
+                  <option value="10y">10-year CAGR</option>
+                </select>
+                <button
+                  onClick={()=>{
+                    const map: Record<"YoY"|"5y"|"10y", number | null> = { YoY: elecYoYPct, "5y": elecCAGR5, "10y": elecCAGR10 };
+                    const v = map[elecDriftChoice];
+                    if (typeof v === "number") setElecDriftPct(Number(v.toFixed(2)));
+                  }}
+                  disabled={
+                    (elecDriftChoice === "YoY"  && elecYoYPct   === null) ||
+                    (elecDriftChoice === "5y"   && elecCAGR5    === null) ||
+                    (elecDriftChoice === "10y"  && elecCAGR10   === null)
+                  }
+                  className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-bitcoin text-black border-transparent"
+                  title="Set model electricity drift % to selected horizon"
+                >
+                  Use drift
+                </button>
+                <span className="text-xs text-fg-subtle">Model uses base × (1+drift)<sup>years</sup></span>
+              </div>
             </>
           )}
         </div>
@@ -564,7 +579,7 @@ export default function EnergyCapBTCModel() {
           ) : (
             <>
               <div className="text-sm">Hashrate: <span className="font-semibold">{hashEhs !== null ? `${hashEhs.toFixed(1)} EH/s` : "—"}</span></div>
-              <div className="text-xs text-fg-subtle">Difficulty: {hashDiffT !== null ? `${hashDiffT.toFixed(1)} T` : "—"}</div>
+              <div className="text-xs text-fg-subtle">Difficulty: {hashDiffT !== null ? `${hashDiffT.toFixed(2)} T` : "—"}</div>
               <div className="text-[11px] text-fg-subtle">{hashSource ? `Source: ${hashSource}` : ""} {hashAsOf ? `• ${fmtDate(hashAsOf)} ${fmtTime(hashAsOf)}` : ""}</div>
               <div className="pill text-[11px] w-fit mt-1">⚡ Higher hashrate ⇒ fiercer competition</div>
             </>

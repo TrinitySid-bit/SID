@@ -1,70 +1,89 @@
 ﻿import type { NextApiRequest, NextApiResponse } from "next";
 
-/**
- * GET /api/cpi
- * Pulls CPI-U All Items, Seasonally Adjusted (CUSR0000SA0) from BLS API.
- * Returns latest monthly value and YoY% for that month.
- *
- * .env.local: BLS_API_KEY=<your bls key>  (optional; higher rate limits)
- */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+type BlsSeriesPoint = {
+  period: string; // "M01".."M12"
+  year: string;   // "2025"
+  value: string;  // e.g. "312.331"
+};
+
+type BlsSeries = {
+  seriesID: string;
+  data: BlsSeriesPoint[];
+};
+
+type BlsResponse = {
+  status: string;
+  Results?: { series: BlsSeries[] };
+  message?: string[];
+};
+
+type CpiOk = {
+  ok: true;
+  latest: { dateISO: string; value: number };
+  yoyPct: number;
+  source: string;
+};
+
+type CpiErr = { ok: false; error: string };
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse<CpiOk | CpiErr>) {
   try {
-    const series = (req.query.series as string) || "CUSR0000SA0";
+    const seriesId = (req.query.series as string) || "CUSR0000SA0"; // CPI-U, SA
+    const key = process.env.BLS_API_KEY;
+    if (!key) return res.status(500).json({ ok: false, error: "Missing BLS_API_KEY" });
+
     const now = new Date();
-    const endYear = now.getUTCFullYear();
-    const startYear = endYear - 6; // last ~6 years is plenty
+    const startYear = String(now.getUTCFullYear() - 2);
+    const endYear = String(now.getUTCFullYear());
 
-    const body: any = {
-      seriesid: [series],
-      startyear: String(startYear),
-      endyear: String(endYear),
-    };
-    if (process.env.BLS_API_KEY) body.registrationKey = process.env.BLS_API_KEY;
-
-    const bls = await fetch("https://api.bls.gov/publicAPI/v2/timeseries/data/", {
+    const r = await fetch("https://api.bls.gov/publicAPI/v2/timeseries/data/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ seriesid: [seriesId], startyear: startYear, endyear: endYear, registrationKey: key }),
+      cache: "no-store",
     });
 
-    if (!bls.ok) {
-      const text = await bls.text();
-      return res.status(bls.status).json({ ok: false, error: `BLS HTTP ${bls.status}: ${text}` });
+    if (!r.ok) {
+      return res.status(502).json({ ok: false, error: `BLS API HTTP ${r.status}` });
+    }
+    const j: BlsResponse = await r.json();
+
+    const series = j?.Results?.series?.[0];
+    if (!series || !Array.isArray(series.data) || series.data.length === 0) {
+      return res.status(502).json({ ok: false, error: "No CPI data returned" });
     }
 
-    const json = await bls.json();
-    if (json.status !== "REQUEST_SUCCEEDED") {
-      return res.status(500).json({ ok: false, error: json?.message || "BLS API error" });
-    }
-
-    const seriesData = json?.Results?.series?.[0]?.data;
-    if (!Array.isArray(seriesData) || seriesData.length === 0) {
-      return res.status(404).json({ ok: false, error: "No CPI data returned" });
-    }
-
-    // Data is reverse-chronological; find the newest real month (M01..M12)
-    const monthly = seriesData.filter((d: any) => /^M(0[1-9]|1[0-2])$/.test(d.period));
-    if (monthly.length === 0) return res.status(404).json({ ok: false, error: "No monthly CPI rows" });
-
-    const latest = monthly[0]; // newest first
-    const latestYear = Number(latest.year);
-    const latestMonth = Number(latest.period.substring(1)); // "M10" -> 10
+    // BLS returns reverse-chronological; find latest month and the same month last year
+    const latest = series.data[0];
     const latestVal = Number(latest.value);
+    const latestYear = Number(latest.year);
+    const latestMonth = Number(latest.period.replace("M", ""));
+    if (!Number.isFinite(latestVal) || !latestYear || !latestMonth) {
+      return res.status(502).json({ ok: false, error: "Malformed CPI latest point" });
+    }
 
-    // find same month last year for YoY
-    const yoyRow = monthly.find((d: any) => Number(d.year) === latestYear - 1 && Number(d.period.substring(1)) === latestMonth);
-    const yoyVal = yoyRow ? Number(yoyRow.value) : undefined;
+    const lastYearPoint = series.data.find(
+      (p) => Number(p.year) === latestYear - 1 && Number(p.period.replace("M", "")) === latestMonth
+    );
+    if (!lastYearPoint) {
+      return res.status(502).json({ ok: false, error: "Missing prior-year CPI point" });
+    }
+    const lastYearVal = Number(lastYearPoint.value);
+    if (!Number.isFinite(lastYearVal)) {
+      return res.status(502).json({ ok: false, error: "Malformed prior-year CPI value" });
+    }
 
-    const dateISO = new Date(Date.UTC(latestYear, latestMonth - 1, 1)).toISOString().slice(0, 10);
-    const yoyPct = yoyVal ? ((latestVal - yoyVal) / yoyVal) * 100 : undefined;
+    const yoyPct = ((latestVal - lastYearVal) / lastYearVal) * 100;
+    const dateISO = new Date(Date.UTC(latestYear, latestMonth - 1, 1)).toISOString();
 
     return res.status(200).json({
       ok: true,
-      series,
       latest: { dateISO, value: latestVal },
-      yoyPct, // e.g., 3.2 (%)
+      yoyPct,
+      source: "BLS publicAPI v2 (SA series)",
     });
-  } catch (err: any) {
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return res.status(500).json({ ok: false, error: msg });
   }
 }
