@@ -38,6 +38,7 @@ const PRESETS = {
 type PresetName = keyof typeof PRESETS;
 
 const MS_PER_YEAR = 365.2425 * 24 * 3600 * 1000;
+const HOURS_PER_YEAR = 24 * 365.2425;
 const BLOCKS_PER_YEAR = (365.2425 * 24 * 3600) / 600;
 
 function yearsBetween(aISO: string, bISO: string): number {
@@ -69,6 +70,9 @@ const THRESHOLDS_BLOCKS = [
   { label: "4,320 blocks",blocks: 4320, time: "1 month (30d)" },
 ];
 
+// Anchored adoption parameters
+const ADOPTION = { steepness: 0.55, floor: 1e-6 } as const; // k chosen for gentle S-curve
+
 export default function EnergyCapBTCModel() {
   // Scenario/date/stack
   const [preset, setPreset] = useState<PresetName>("Base");
@@ -84,6 +88,13 @@ export default function EnergyCapBTCModel() {
   const [elecDriftPct, setElecDriftPct] = useState(1.0);
   const [cpiPct, setCpiPct] = useState(2.5);
   const [overheadPhi, setOverheadPhi] = useState(1.15);
+
+  // Nominal vs Real
+  const [showReal, setShowReal] = useState(false);
+
+  // Adoption ramp controls
+  const [useAdoptionRamp, setUseAdoptionRamp] = useState(true);
+  const [effNowJperTH, setEffNowJperTH] = useState(20); // default ~20 J/TH modern ASIC
 
   // Live CPI
   const [useLiveCpi, setUseLiveCpi] = useState(true);
@@ -128,9 +139,6 @@ export default function EnergyCapBTCModel() {
   const [elecCAGR5, setElecCAGR5] = useState<number | null>(null);
   const [elecCAGR10, setElecCAGR10] = useState<number | null>(null);
   const [elecDriftChoice, setElecDriftChoice] = useState<"YoY"|"5y"|"10y">("10y");
-
-  // Nominal vs Real
-  const [showReal, setShowReal] = useState(false);
 
   const targetISO = useMemo(() => {
     const mm = String(month).padStart(2, "0");
@@ -237,7 +245,7 @@ export default function EnergyCapBTCModel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Model math helpers ---
+  // --- Model helpers ---
   const subsidyOnDate = useCallback((iso: string) => {
     const t = new Date(iso).getTime();
     let current = ALL_ERAS[0].subsidy;
@@ -248,8 +256,9 @@ export default function EnergyCapBTCModel() {
     return current;
   }, []);
 
-  const worldElectricityTWh = useCallback((iso: string) => {
-    const yearsRel = new Date(iso).getUTCFullYear() - 2024;
+  const worldElectricityTWh = useCallback((iso: string | number) => {
+    const y = typeof iso === "string" ? new Date(iso).getUTCFullYear() : iso;
+    const yearsRel = y - 2024;
     return CONFIG.worldElecBaseTWh2024 * Math.pow(1 + CONFIG.worldElecGrowth, yearsRel);
   }, []);
 
@@ -264,15 +273,58 @@ export default function EnergyCapBTCModel() {
     return Math.pow(1 + cpiPct/100, years);
   }, [cpiPct]);
 
-  const worldTwhToBtcTwh = (worldTWh: number, capSharePct_: number, util: number) =>
-    worldTWh * (capSharePct_/100) * util;
+  // Infer today's BTC electricity share from live hashrate and current efficiency
+  const impliedShareToday = useMemo(() => {
+    if (hashEhs === null || !Number.isFinite(hashEhs)) return null;
+    // Power (W) = EH/s * 1e6 (TH/EH) * J/TH
+    const powerW = hashEhs * 1e6 * effNowJperTH;
+    // TWh/year = W * hours/year / 1e12
+    const btcTWh = (powerW * HOURS_PER_YEAR) / 1e12;
+    const worldTWh = worldElectricityTWh(new Date(CONFIG.baseDateISO).getUTCFullYear());
+    if (worldTWh <= 0) return null;
+    const share = btcTWh / worldTWh; // fraction (0..1)
+    return share;
+  }, [hashEhs, effNowJperTH, worldElectricityTWh]);
+
+  // Anchored logistic adoption factor
+  const anchoredAdoption = useCallback((iso: string, p: PresetName) => {
+    if (!useAdoptionRamp) return 1;
+    const y = new Date(iso).getUTCFullYear();
+    const baseYear = new Date(CONFIG.baseDateISO).getUTCFullYear();
+    const util = PRESETS[p].capUtilMultiplier;
+
+    // normalized anchor a0 = (actual share today) / (cap share today)
+    const capShareFraction = (capSharePct/100) * util;
+    let a0 = impliedShareToday !== null && capShareFraction > 0 ? (impliedShareToday / capShareFraction) : null;
+
+    // Clamp a0 into (floor..1-eps); if null, fall back to a gentle fixed path
+    if (a0 === null || !isFinite(a0)) {
+      const x = 1 / (1 + Math.exp(-ADOPTION.steepness * (y - (baseYear + 10))));
+      return Math.max(ADOPTION.floor, x);
+    }
+    a0 = Math.max(ADOPTION.floor + 1e-6, Math.min(1 - 1e-6, a0));
+
+    // Solve logistic to pass through (baseYear, a0): a0 = 1/(1+e^{-k(baseYear-y0)})
+    const y0 = baseYear + (1/ADOPTION.steepness) * Math.log(1/a0 - 1);
+
+    // Adoption at year y
+    const x = 1 / (1 + Math.exp(-ADOPTION.steepness * (y - y0)));
+    return Math.max(ADOPTION.floor, Math.min(1, x));
+  }, [useAdoptionRamp, impliedShareToday, capSharePct]);
+
+  const worldTwhToBtcTwh = (worldTWh: number, capShareEff: number) => worldTWh * capShareEff;
 
   const priceFromEnergyCap = useCallback((iso: string, p: PresetName) => {
     const S = subsidyOnDate(iso);
     const S_eff = S * (1 + feesPct/100);
 
     const worldTWh = worldElectricityTWh(iso);
-    const btcTWh = worldTwhToBtcTwh(worldTWh, capSharePct, PRESETS[p].capUtilMultiplier);
+    const util = PRESETS[p].capUtilMultiplier;
+
+    // Effective share = capShare * util * adoption(anchored)
+    const adoption = anchoredAdoption(iso, p);
+    const capShareEff = (capSharePct/100) * util * adoption;
+    const btcTWh = worldTwhToBtcTwh(worldTWh, capShareEff);
 
     const energyPerBlockWh = (btcTWh * 1e12) / BLOCKS_PER_YEAR;
     const usdPerKWh = electricityPriceUSDkWh(iso, p);
@@ -285,9 +337,9 @@ export default function EnergyCapBTCModel() {
     const fairPerBTCReal = fairPerBTC / cpi;
 
     return { S, S_eff, floorPerBTC, fairPerBTC, fairPerBTCReal };
-  }, [capSharePct, feesPct, overheadPhi, subsidyOnDate, worldElectricityTWh, electricityPriceUSDkWh, cpiFactor]);
+  }, [capSharePct, feesPct, overheadPhi, subsidyOnDate, worldElectricityTWh, electricityPriceUSDkWh, cpiFactor, anchoredAdoption]);
 
-  // Milestones
+  // Milestones (first eras where your stack >= threshold blocks)
   const milestones = useMemo(() => {
     const feeMult = 1 + feesPct/100;
     return THRESHOLDS_BLOCKS.map((t) => {
@@ -422,6 +474,36 @@ export default function EnergyCapBTCModel() {
             <span className="text-sm">Real (CPI)</span>
           </div>
 
+          {/* Adoption ramp toggle + efficiency now */}
+          <div className="mt-3 border-t border-border pt-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-sm">Adoption ramp (anchored to today)</span>
+                <button
+                  onClick={() => setUseAdoptionRamp(!useAdoptionRamp)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${useAdoptionRamp ? "bg-bitcoin" : "bg-panel border border-border"}`}
+                  title="Scale energy share up from today's implied share to your cap over time"
+                >
+                  <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${useAdoptionRamp ? "translate-x-5" : "translate-x-1"}`} />
+                </button>
+              </div>
+              <div className="text-xs text-fg-subtle">
+                {impliedShareToday !== null ? `Implied BTC share today: ${(impliedShareToday*100).toFixed(3)}%` : "Implied share: —"}
+              </div>
+            </div>
+            <div className="mt-2">
+              <div className="text-xs text-fg-subtle mb-1">Hardware efficiency now (J/TH)</div>
+              <input
+                type="number"
+                min={1}
+                step={0.5}
+                value={effNowJperTH}
+                onChange={(e)=>setEffNowJperTH(Math.max(1, Number(e.target.value)))}
+                className="w-28 border border-border bg-panel rounded px-2 py-1"
+              />
+            </div>
+          </div>
+
           {/* Live CPI controls */}
           <div className="mt-3 border-t border-border pt-3">
             <label className="text-sm font-medium">Inflation (CPI, BLS SA)</label>
@@ -442,7 +524,7 @@ export default function EnergyCapBTCModel() {
             </div>
           </div>
 
-          {/* Model dials (uses the setters so ESLint is happy) */}
+          {/* Model dials */}
           <div className="mt-3 border-t border-border pt-3">
             <label className="text-sm font-medium">Model dials</label>
             <div className="mt-2 grid grid-cols-2 gap-3">
