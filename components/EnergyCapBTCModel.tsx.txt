@@ -1,0 +1,320 @@
+import React, { useMemo, useState } from "react";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
+
+/**
+ * SID Model — Bitcoin Energy-Cap Valuation
+ * Nominal by default; toggle to Real (CPI) view.
+ */
+
+const CONFIG = {
+  baseDateISO: "2025-10-01", // CPI & electricity growth reference (launch date)
+  worldElecBaseTWh2024: 30000, // world electricity in 2024 (TWh)
+  worldElecGrowth: 0.025, // 2.5%/yr
+  elecPriceBaseUSDperKWh: 0.06, // in 2025
+  elecPriceGrowth: 0.01, // 1%/yr
+  overheadPhi: 1.15,
+  feesPctOfSubsidy: 0.15, // 15%
+  cpiAnnual: 0.025, // 2.5%/yr
+  capShare: 0.015, // 1.5% of world electricity
+  halvingDates: [
+    "2024-04-20",
+    "2028-04-20",
+    "2032-04-20",
+    "2036-04-20",
+    "2040-04-20",
+    "2044-04-20",
+    "2048-04-20",
+    "2052-04-20",
+  ],
+  subsidyAfter2024: 3.125, // BTC/block after 2024 halving
+} as const;
+
+const PRESETS = {
+  Bearish: { capUtilShare: CONFIG.capShare * 0.7, elecPriceMultiplier: 0.844, markup: 1.2 },
+  Base:    { capUtilShare: CONFIG.capShare,       elecPriceMultiplier: 1.0,   markup: 1.5 },
+  Bullish: { capUtilShare: CONFIG.capShare,       elecPriceMultiplier: 1.169, markup: 2.0 },
+} as const;
+
+type PresetName = keyof typeof PRESETS;
+
+const MS_PER_YEAR = 365.2425 * 24 * 3600 * 1000;
+const BLOCKS_PER_YEAR = (365.2425 * 24 * 3600) / 600; // ~52,596
+
+function yearsBetween(aISO: string, bISO: string): number {
+  const a = new Date(aISO).getTime();
+  const b = new Date(bISO).getTime();
+  return Math.max(0, (b - a) / MS_PER_YEAR);
+}
+
+function subsidyOnDate(targetISO: string): number {
+  const base = CONFIG.subsidyAfter2024;
+  const t = new Date(targetISO).getTime();
+  const passed = CONFIG.halvingDates.slice(1).filter((d) => new Date(d).getTime() <= t).length;
+  return base / Math.pow(2, passed);
+}
+
+function worldElectricityTWh(targetISO: string): number {
+  const years = yearsBetween("2024-12-31", targetISO);
+  return CONFIG.worldElecBaseTWh2024 * Math.pow(1 + CONFIG.worldElecGrowth, years);
+}
+
+function electricityPriceUSDkWh(targetISO: string, preset: PresetName): number {
+  const years = yearsBetween(CONFIG.baseDateISO, targetISO);
+  const base = CONFIG.elecPriceBaseUSDperKWh * Math.pow(1 + CONFIG.elecPriceGrowth, years);
+  return base * PRESETS[preset].elecPriceMultiplier;
+}
+
+function cpiFactor(targetISO: string): number {
+  const years = yearsBetween(CONFIG.baseDateISO, targetISO);
+  return Math.pow(1 + CONFIG.cpiAnnual, years);
+}
+
+function priceFromEnergyCap(targetISO: string, preset: PresetName) {
+  const S = subsidyOnDate(targetISO);
+  const S_eff = S * (1 + CONFIG.feesPctOfSubsidy);
+
+  const worldTWh = worldElectricityTWh(targetISO);
+  const share = PRESETS[preset].capUtilShare;
+  const btcTWh = worldTWh * share;
+
+  const energyPerBlockWh = (btcTWh * 1e12) / BLOCKS_PER_YEAR;
+  const usdPerKWh = electricityPriceUSDkWh(targetISO, preset);
+  const costPerBlockUSD = (energyPerBlockWh / 1000) * usdPerKWh * CONFIG.overheadPhi;
+
+  const floorPerBTC = costPerBlockUSD / S_eff;
+  const fairPerBTC = floorPerBTC * PRESETS[preset].markup;
+
+  const cpi = cpiFactor(targetISO);
+  const fairPerBTCReal = fairPerBTC / cpi;
+
+  return { S, S_eff, worldTWh, btcTWh, usdPerKWh, floorPerBTC, fairPerBTC, fairPerBTCReal };
+}
+
+// Build 25-year per-BTC price series (annual points)
+function buildSeries25Years(preset: PresetName, showReal: boolean) {
+  const base = new Date(CONFIG.baseDateISO);
+  const mm = String(base.getMonth() + 1).padStart(2, "0");
+  const dd = String(base.getDate()).padStart(2, "0");
+  const startYear = base.getFullYear();
+  const out: { year: number; price: number }[] = [];
+  for (let y = 0; y <= 25; y++) {
+    const yr = startYear + y;
+    const iso = `${yr}-${mm}-${dd}`;
+    const r = priceFromEnergyCap(iso, preset);
+    const price = showReal ? r.fairPerBTCReal : r.fairPerBTC;
+    out.push({ year: yr, price });
+  }
+  return out;
+}
+
+function formatUSD(x: number) {
+  return x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+}
+function formatShortUSD(x: number) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 2 }).format(x);
+  } catch {
+    return `$${Math.round(x).toLocaleString()}`;
+  }
+}
+
+// --- Block thresholds ---
+function generateHalvingSchedule(startISO: string, count: number): string[] {
+  const out: string[] = [];
+  let d = new Date(startISO);
+  for (let i = 0; i < count; i++) {
+    out.push(d.toISOString().slice(0, 10));
+    const nd = new Date(d);
+    nd.setFullYear(nd.getFullYear() + 4);
+    d = nd;
+  }
+  return out;
+}
+
+const THRESHOLDS_BLOCKS = [
+  { label: "1 block", blocks: 1, time: "10 minutes" },
+  { label: "6 blocks", blocks: 6, time: "1 hour" },
+  { label: "144 blocks", blocks: 144, time: "1 day" },
+  { label: "1,008 blocks", blocks: 1008, time: "1 week" },
+  { label: "4,320 blocks", blocks: 4320, time: "1 month (30d)" },
+];
+
+function blockThresholdsForStack(stackBTC: number) {
+  const halvingStart = CONFIG.halvingDates[0];
+  const eras = generateHalvingSchedule(halvingStart, 50);
+  const feeMult = 1 + CONFIG.feesPctOfSubsidy;
+
+  const blocksByEra = eras.map((date, i) => {
+    const S_i = CONFIG.subsidyAfter2024 / Math.pow(2, i);
+    const S_eff_i = S_i * feeMult;
+    const blocks = stackBTC / S_eff_i;
+    return { date, blocks, S_i, S_eff_i };
+  });
+
+  const out = THRESHOLDS_BLOCKS.map((t) => {
+    const hit = blocksByEra.find((e) => e.blocks >= t.blocks);
+    return {
+      label: t.label,
+      time: t.time,
+      date: hit ? hit.date : "—",
+      blocksAtEra: hit ? hit.blocks : 0,
+      subsidyBTC: hit ? hit.S_i : undefined,
+      issuanceEffBTC: hit ? hit.S_eff_i : undefined,
+    };
+  });
+  return out;
+}
+
+function ThresholdList({ stackBTC }: { stackBTC: number }) {
+  const items = useMemo(() => blockThresholdsForStack(stackBTC), [stackBTC]);
+  return (
+    <ul className="list-disc ml-5 text-sm space-y-1">
+      {items.map((it) => (
+        <li key={it.label}>
+          <span className="font-medium">{it.label}</span>{" "}
+          <span className="text-gray-600">({it.time})</span>: {it.date}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export default function EnergyCapBTCModel() {
+  const [preset, setPreset] = useState<PresetName>("Base");
+  const [year, setYear] = useState<number>(2050);
+  const [month, setMonth] = useState<number>(10);
+  const [day, setDay] = useState<number>(13);
+  const [stackBTC, setStackBTC] = useState<number>(0.01);
+  const [showReal, setShowReal] = useState<boolean>(false);
+
+  const targetISO = useMemo(() => {
+    const mm = String(month).padStart(2, "0");
+    const dd = String(day).padStart(2, "0");
+    return `${year}-${mm}-${dd}`;
+  }, [year, month, day]);
+
+  const result = useMemo(() => priceFromEnergyCap(targetISO, preset), [targetISO, preset]);
+
+  const minutesPerBlock = useMemo(() => (10 * stackBTC) / result.S_eff, [stackBTC, result.S_eff]);
+  const shareDailyIssuance = useMemo(() => stackBTC / (144 * result.S_eff), [stackBTC, result.S_eff]);
+
+  const perBTC = showReal ? result.fairPerBTCReal : result.fairPerBTC;
+  const perStack = perBTC * stackBTC;
+
+  return (
+    <div className="mx-auto max-w-5xl p-6 space-y-6">
+      <header className="space-y-2">
+        <h1 className="text-2xl font-bold">SID: Scarcity • Incentives • Demand</h1>
+        <p className="text-sm text-gray-600">A disciplined, energy-based way to price Bitcoin across any time horizon.</p>
+        <div className="text-xs text-gray-500">
+          Cap: <span className="font-medium">1.5% of global electricity</span> • Fees: <span className="font-medium">15% of subsidy</span> •{" "}
+          <span className="font-medium">Nominal by default</span>
+        </div>
+      </header>
+
+      {/* Controls */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="p-4 rounded-2xl shadow bg-white space-y-3">
+          <div>
+            <label className="text-sm font-medium">Scenario</label>
+            <div className="mt-2 flex gap-2">
+              {Object.keys(PRESETS).map((name) => (
+                <button
+                  key={name}
+                  onClick={() => setPreset(name as PresetName)}
+                  className={`px-3 py-1 rounded-full border ${preset === name ? "bg-black text-white" : "bg-white"}`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Target date</label>
+            <div className="mt-2 space-y-2">
+              <input type="range" min={2025} max={2175} value={year} onChange={(e)=>setYear(Number(e.target.value))} className="w-full" />
+              <div className="flex items-center gap-2">
+                <input type="number" min={2025} max={2175} value={year} onChange={(e)=>setYear(Number(e.target.value))} className="w-24 border rounded px-2 py-1" />
+                <input type="number" min={1} max={12} value={month} onChange={(e)=>setMonth(Number(e.target.value))} className="w-20 border rounded px-2 py-1" />
+                <input type="number" min={1} max={31} value={day} onChange={(e)=>setDay(Number(e.target.value))} className="w-20 border rounded px-2 py-1" />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm font-medium">Stack (BTC)</label>
+            <input type="number" step={0.00000001} value={stackBTC} onChange={(e)=>setStackBTC(Number(e.target.value))} className="mt-2 w-full border rounded px-2 py-1" />
+          </div>
+
+          <div className="flex items-center gap-2 pt-2">
+            <input id="realToggle" type="checkbox" checked={showReal} onChange={(e)=>setShowReal(e.target.checked)} />
+            <label htmlFor="realToggle" className="text-sm">Show today’s dollars (CPI)</label>
+          </div>
+        </div>
+
+        {/* Your Stack card */}
+        <div className="p-4 rounded-2xl shadow bg-white space-y-2">
+          <h3 className="font-semibold">Your Stack</h3>
+          <div className="text-3xl font-bold">{formatUSD(perStack)}</div>
+          <div className="text-xs text-gray-500">{stackBTC} BTC • {showReal ? "Real (today’s $)" : "Nominal"} fair value</div>
+          <div className="mt-3 text-sm">Per BTC: <span className="font-semibold">{formatUSD(perBTC)}</span></div>
+          <div className="text-xs text-gray-500">{showReal ? "Real (today’s $)" : "Nominal"} fair value using preset markup</div>
+          <div className="mt-3 text-sm">Floor (per BTC, nominal): <span className="font-semibold">{formatUSD(result.floorPerBTC)}</span></div>
+        </div>
+
+        {/* Minutes & issuance */}
+        <div className="p-4 rounded-2xl shadow bg-white space-y-2">
+          <h3 className="font-semibold">Future Mining Minutes & Issuance</h3>
+          <div className="text-sm">Minutes per block: <span className="font-semibold">{minutesPerBlock.toFixed(2)} min</span></div>
+          <div className="text-sm">Daily issuance share: <span className="font-semibold">{(shareDailyIssuance*100).toFixed(3)}%</span></div>
+          <div className="text-xs text-gray-500">Uses effective issuance S+F where F = 15% of subsidy</div>
+          <div className="pt-3">
+            <h4 className="font-semibold text-sm">When your stack equals key block thresholds</h4>
+            <ThresholdList stackBTC={stackBTC} />
+            <div className="text-xs text-gray-500 mt-1">These thresholds depend only on the halving schedule and the fee %, not on price or electricity. As the subsidy halves, each block contains fewer BTC, so a fixed stack equals more blocks (i.e., more global mining time).</div>
+          </div>
+        </div>
+      </section>
+
+      {/* 1 BTC — 25-Year Price Chart */}
+      <section className="p-4 rounded-2xl shadow bg-white space-y-2">
+        <h3 className="font-semibold">1 BTC — 25-Year Price (Model)</h3>
+        <p className="text-xs text-gray-500">Uses the current scenario preset and electricity-share cap. Nominal by default; flip the switch to show today’s dollars (CPI).</p>
+        <div className="w-full h-64">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={useMemo(() => buildSeries25Years(preset, showReal), [preset, showReal])} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="year" tick={{ fontSize: 12 }} />
+              <YAxis tickFormatter={(v: any) => formatShortUSD(Number(v))} tick={{ fontSize: 12 }} />
+              <Tooltip formatter={(v: any) => formatUSD(Number(v))} labelFormatter={(l: any) => `Year ${l}`} />
+              <Legend />
+              <Line type="monotone" dataKey="price" name={showReal ? "Per BTC (Real)" : "Per BTC (Nominal)"} strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      {/* Methodology */}
+      <section className="p-4 rounded-2xl shadow bg-white grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <h4 className="font-semibold mb-1">Key assumptions</h4>
+          <ul className="list-disc ml-5 text-sm space-y-1">
+            <li>Global electricity grows at 2.5%/yr from 30,000 TWh (2024)</li>
+            <li>BTC energy share cap: 1.5% (preset utilization applied)</li>
+            <li>Electricity price drifts +1%/yr from $0.06/kWh (scenario multipliers)</li>
+            <li>Overhead φ = 1.15; Fees = 15% of subsidy included in issuance</li>
+            <li>CPI +2.5%/yr; toggle to show inflation-adjusted dollars</li>
+          </ul>
+        </div>
+        <div>
+          <h4 className="font-semibold mb-1">Internals</h4>
+          <ul className="list-disc ml-5 text-sm space-y-1">
+            <li>Energy per block = (share × world TWh) / blocks per year</li>
+            <li>Cost per block = energy per block × $/kWh × φ</li>
+            <li>Floor (USD/BTC) = cost per block / (S + fees)</li>
+            <li>Fair value = floor × preset markup</li>
+          </ul>
+        </div>
+        <div className="col-span-1 md:col-span-2 text-xs text-gray-500">
+          Education only; not financial advice. All models are inherently wrong and should b

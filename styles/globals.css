@@ -1,0 +1,26 @@
+﻿/* Tailwind layers */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base theme */
+@layer base {
+  html, body {
+    @apply bg-bg text-fg;
+  }
+}
+
+/* Reusable UI tokens */
+@layer components {
+  .card {
+    @apply bg-card text-fg border border-border rounded-2xl shadow-card;
+  }
+  .pill {
+    @apply inline-flex items-center gap-2 px-2 py-1 rounded-full bg-panel text-fg border border-border;
+  }
+  .btn { @apply px-3 py-1 rounded-full border text-sm transition; }
+  .btn-active { @apply bg-bitcoin text-black border-transparent shadow; }
+  .btn-ghost { @apply bg-panel text-fg border border-border hover:bg-card; }
+  .muted { @apply text-fg-muted; }
+  .subtle { @apply text-fg-subtle; }
+}
