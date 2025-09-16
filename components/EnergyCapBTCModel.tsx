@@ -441,6 +441,39 @@ export default function EnergyCapBTCModel() {
               <span className="ml-2 text-xs text-fg-subtle">%</span>
             </div>
           </div>
+
+          {/* Model dials (uses the setters so ESLint is happy) */}
+          <div className="mt-3 border-t border-border pt-3">
+            <label className="text-sm font-medium">Model dials</label>
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-xs text-fg-subtle mb-1">Bitcoin energy cap share</div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    value={capSharePct}
+                    onChange={(e)=>setCapSharePct(Math.max(0, Number(e.target.value)))}
+                    className="w-28 border border-border bg-panel rounded px-2 py-1"
+                  />
+                  <span className="text-xs text-fg-subtle">%</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-fg-subtle mb-1">Overhead factor φ</div>
+                <input
+                  type="number"
+                  min={1}
+                  step={0.01}
+                  value={overheadPhi}
+                  onChange={(e)=>setOverheadPhi(Math.max(1, Number(e.target.value)))}
+                  className="w-28 border border-border bg-panel rounded px-2 py-1"
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -536,7 +569,7 @@ export default function EnergyCapBTCModel() {
                 </div>
               </div>
 
-              {/* Drift chooser (so elecDriftChoice is used) */}
+              {/* Drift chooser */}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label className="text-sm font-medium">Use drift from:</label>
                 <select value={elecDriftChoice} onChange={(e)=>setElecDriftChoice(e.target.value as "YoY"|"5y"|"10y")} className="border border-border bg-panel rounded px-2 py-1 text-sm">
