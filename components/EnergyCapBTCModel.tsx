@@ -33,14 +33,12 @@ const PRESETS = {
 } as const;
 type PresetName = keyof typeof PRESETS;
 
-const HOURS_PER_YEAR = 24 * 365.2425;
 const BLOCKS_PER_YEAR = (365.2425 * 24 * 3600) / 600;
 
 function yearsBetween(aISO: string, bISO: string){ return (new Date(bISO).getTime()-new Date(aISO).getTime())/(365.2425*24*3600*1000) }
 function formatUSD(x: number){ return x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }); }
 function formatShortUSD(x: number){ try { return new Intl.NumberFormat(undefined,{style:"currency",currency:"USD",notation:"compact",maximumFractionDigits:2}).format(x);} catch { return `$${Math.round(x).toLocaleString()}`; } }
 function fmtDate(iso: string){ return new Date(iso).toLocaleDateString(undefined,{year:"numeric",month:"short",day:"numeric"}); }
-function fmtTime(iso: string){ return new Date(iso).toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"}); }
 
 const THRESHOLDS_BLOCKS = [
   { label: "1 block", blocks: 1, time: "10 minutes" },
@@ -53,30 +51,23 @@ const THRESHOLDS_BLOCKS = [
 const ADOPTION = { steepness: 0.55, floor: 1e-6 } as const;
 
 export default function EnergyCapBTCModel() {
+  // Primary controls
   const [preset, setPreset] = useState<PresetName>("Base");
   const [year, setYear] = useState(2050);
   const [month, setMonth] = useState(10);
   const [day, setDay] = useState(13);
   const [stackBTC, setStackBTC] = useState(0.01);
-
-  const [capSharePct, setCapSharePct] = useState(1.5);
-  const [feesPct, setFeesPct] = useState(15);
-  const [elecBaseUSDkWh, setElecBaseUSDkWh] = useState(0.06);
-  const [elecDriftPct, setElecDriftPct] = useState(1.0);
-  const [cpiPct, setCpiPct] = useState(2.5);
-  const [overheadPhi, setOverheadPhi] = useState(1.15);
   const [showReal, setShowReal] = useState(false);
 
-  // Live cards (already wired elsewhere in your app)
-  const [cpiYoYLatest, setCpiYoYLatest] = useState<number | null>(null);
-  const [cpiLatestDate, setCpiLatestDate] = useState<string | null>(null);
-  const [hashEhs, setHashEhs] = useState<number | null>(null);
-  const [hashDiffT, setHashDiffT] = useState<number | null>(null);
-  const [hashAsOf, setHashAsOf] = useState<string | null>(null);
-  const [feeSharePctLive, setFeeSharePctLive] = useState<number | null>(null);
-  const [elecLatestUSD, setElecLatestUSD] = useState<number | null>(null);
+  // Model parameters (values only — no unused setters)
+  const [capSharePct] = useState(1.5);
+  const [feesPct] = useState(15);
+  const [elecBaseUSDkWh] = useState(0.06);
+  const [elecDriftPct] = useState(1.0);
+  const [cpiPct] = useState(2.5);
+  const [overheadPhi] = useState(1.15);
 
-  // NEW: historical share by year
+  // Historical share (from /api/history)
   const [histByYear, setHistByYear] = useState<Record<number, { share:number; twh:number }> | null>(null);
   const [histLastYear, setHistLastYear] = useState<number | null>(null);
   const [histLastShare, setHistLastShare] = useState<number | null>(null);
@@ -93,13 +84,15 @@ export default function EnergyCapBTCModel() {
       try {
         setHistErr(null);
         const r = await fetch("/api/history", { cache: "no-store" });
-        const js = await r.json();
-        if (!js?.ok) throw new Error(js?.error || "history API error");
-        setHistByYear(js.byYear);
-        setHistLastYear(js.lastYear);
-        setHistLastShare(js.lastShare);
-      } catch (e:any) {
-        setHistErr(e.message || String(e));
+        const js: unknown = await r.json();
+        const o = js as { ok?: boolean; byYear?: Record<number, {share:number;twh:number}>; lastYear?: number; lastShare?: number; error?: string };
+        if (!o?.ok) throw new Error(o?.error || "history API error");
+        setHistByYear(o.byYear || null);
+        setHistLastYear(typeof o.lastYear === "number" ? o.lastYear : null);
+        setHistLastShare(typeof o.lastShare === "number" ? o.lastShare : null);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setHistErr(msg);
       }
     })();
   }, []);
@@ -128,19 +121,18 @@ export default function EnergyCapBTCModel() {
     return Math.pow(1 + cpiPct/100, years);
   }, [cpiPct]);
 
-  // Anchored adoption ramp starting from the last historical share (if present)
+  // Anchored adoption ramp from last historical share (smooth forward)
   const anchoredAdoption = useCallback((iso: string, p: PresetName) => {
     const y = new Date(iso).getUTCFullYear();
     const util = PRESETS[p].capUtilMultiplier;
     const capShareFraction = (capSharePct/100) * util;
 
-    // If we have a historical anchor (at base year or last historical year), use it
     const baseYear = (histLastYear ?? new Date(CONFIG.baseDateISO).getUTCFullYear());
     const anchorShare = (histLastShare !== null && isFinite(histLastShare)) ? histLastShare : 0.001;
-    const a0 = Math.max(ADOPTION.floor + 1e-6, Math.min(1 - 1e-6, capShareFraction > 0 ? (anchorShare / capShareFraction) : 0.01));
+    const a0Raw = capShareFraction > 0 ? (anchorShare / capShareFraction) : 0.01;
+    const a0 = Math.max(ADOPTION.floor + 1e-6, Math.min(1 - 1e-6, a0Raw));
 
-    // Solve logistic: a0 = 1/(1+e^{-k(baseYear-y0)}) → y0 = baseYear - (1/k)ln(a0^{-1}-1)
-    const y0 = baseYear - (1/ADOPTION.steepness) * Math.log(1/a0 - 1);
+    const y0 = baseYear - (1/ADOPTION.steepness) * Math.log(1/a0 - 1); // passes through (baseYear, a0)
     const x = 1 / (1 + Math.exp(-ADOPTION.steepness * (y - y0)));
     return Math.max(ADOPTION.floor, Math.min(1, x));
   }, [capSharePct, histLastYear, histLastShare]);
@@ -155,11 +147,9 @@ export default function EnergyCapBTCModel() {
     let share: number;
 
     if (histByYear && typeof histByYear[y]?.share === "number") {
-      // Use actual historical share for that year
-      share = histByYear[y].share;
+      share = histByYear[y].share; // measured past
     } else {
-      // Future (or before history starts): cap share × adoption ramp
-      const adopt = anchoredAdoption(iso, p);
+      const adopt = anchoredAdoption(iso, p); // future
       share = (capSharePct/100) * util * adopt;
     }
 
@@ -174,7 +164,27 @@ export default function EnergyCapBTCModel() {
     return { S, S_eff, fairPerBTC, fairPerBTCReal, floorPerBTC, share };
   }, [feesPct, overheadPhi, capSharePct, histByYear, anchoredAdoption, worldElectricityTWh, electricityPriceUSDkWh, cpiFactor, subsidyOnDate]);
 
-  // Series Genesis→+25y, respecting historical shares
+  // Milestones: first halving era where stack >= threshold blocks
+  const milestones = useMemo(() => {
+    const feeMult = 1 + feesPct/100;
+    return THRESHOLDS_BLOCKS.map((t) => {
+      let found: { start: string; subsidy: number } | null = null;
+      for (let i = 0; i < ALL_ERAS.length; i++) {
+        const S_i = ALL_ERAS[i].subsidy;
+        const S_eff_i = S_i * feeMult;
+        const blocksFromStack = stackBTC / S_eff_i;
+        if (blocksFromStack >= t.blocks) { found = ALL_ERAS[i]; break; }
+      }
+      if (!found) return { label: t.label, time: t.time, date: null as string|null, era: null as number|null, subsidyBTC: null as number|null, blocksAtEra: null as number|null };
+      const date = found.start;
+      const subsidyBTC = found.subsidy;
+      const blocksAtEra = stackBTC / (subsidyBTC * feeMult);
+      const eraIndex = ALL_ERAS.findIndex(e => e.start === found!.start);
+      return { label: t.label, time: t.time, date, era: eraIndex, subsidyBTC, blocksAtEra };
+    });
+  }, [stackBTC, feesPct]);
+
+  // Chart series: Genesis -> +25y
   const seriesFull = useMemo(() => {
     const base = new Date(CONFIG.baseDateISO); const baseYear = base.getFullYear();
     const startYear = 2009, endYear = baseYear + 25;
@@ -192,6 +202,7 @@ export default function EnergyCapBTCModel() {
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 md:p-8 space-y-6">
+      {/* HERO */}
       <header className="space-y-2">
         <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight">
           <span className="text-bitcoin">SID</span>: Scarcity • Incentives • Demand
@@ -201,15 +212,16 @@ export default function EnergyCapBTCModel() {
         </p>
       </header>
 
-      {/* Your Stack + Scenario */}
+      {/* TOP ROW — Your Stack + Scenario */}
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Your Stack */}
         <div className="card p-4 space-y-4">
           <div className="flex items-center">
             <h3 className="font-semibold">Your Stack — Value</h3>
             <Tooltip title="Your Stack — Value">
               <div>
                 <p><b>What:</b> Fair-value estimate of your current BTC stack at the selected date.</p>
-                <p className="mt-1"><b>Driven by:</b> energy cost per block, subsidy (+fees), and your scenario markup.</p>
+                <p className="mt-1"><b>Driven by:</b> energy cost per block, subsidy (+fees), and scenario markup.</p>
                 <p className="mt-1"><b>Changing “Your stack”</b> scales this value linearly.</p>
               </div>
             </Tooltip>
@@ -238,13 +250,14 @@ export default function EnergyCapBTCModel() {
           </div>
         </div>
 
+        {/* Scenario & Date */}
         <div className="card p-4 space-y-3">
           <div className="flex items-center">
             <label className="text-sm font-medium">Scenario</label>
             <Tooltip title="Scenario">
               <div>
-                <p><b>What:</b> Sets utilization of your energy cap, electricity pricing multiplier, and markup.</p>
-                <p className="mt-1"><b>Bearish→Bullish</b> expands energy usage & markup (higher prices).</p>
+                <p><b>What:</b> Utilization of energy cap, electricity pricing multiplier, and markup.</p>
+                <p className="mt-1"><b>Bearish→Bullish</b> increases utilization & markup (higher prices).</p>
               </div>
             </Tooltip>
           </div>
@@ -258,8 +271,8 @@ export default function EnergyCapBTCModel() {
             <label className="text-sm font-medium">Target date</label>
             <Tooltip title="Target date">
               <div>
-                <p><b>What:</b> Date at which the model computes energy, subsidy, and price.</p>
-                <p className="mt-1"><b>Tip:</b> History uses measured network share; future transitions smoothly to your cap.</p>
+                <p><b>What:</b> The date for the model computation.</p>
+                <p className="mt-1"><b>Past:</b> Uses measured network share. <b>Future:</b> Smoothly transitions to your cap.</p>
               </div>
             </Tooltip>
           </div>
@@ -280,8 +293,8 @@ export default function EnergyCapBTCModel() {
             <span className="text-sm">Real (CPI)</span>
             <Tooltip title="Nominal vs Real">
               <div>
-                <p><b>Nominal</b> uses raw dollars at the date.</p>
-                <p><b>Real</b> discounts by CPI (BLS SA) back to today’s buying power.</p>
+                <p><b>Nominal:</b> dollars at the date.</p>
+                <p><b>Real:</b> CPI-adjusted back to today’s buying power.</p>
               </div>
             </Tooltip>
           </div>
@@ -300,13 +313,13 @@ export default function EnergyCapBTCModel() {
               <div>
                 <div className="text-xs text-fg-subtle mb-1">Bitcoin energy cap share</div>
                 <div className="flex items-center gap-2">
-                  <input type="number" min={0} max={100} step={0.1} value={capSharePct} onChange={(e)=>setCapSharePct(Math.max(0, Number(e.target.value)))} className="w-28 border border-border bg-panel rounded px-2 py-1" />
+                  <input type="number" value={capSharePct} disabled className="w-28 border border-border bg-panel rounded px-2 py-1 opacity-60" />
                   <span className="text-xs text-fg-subtle">%</span>
                 </div>
               </div>
               <div>
                 <div className="text-xs text-fg-subtle mb-1">Overhead factor φ</div>
-                <input type="number" min={1} step={0.01} value={overheadPhi} onChange={(e)=>setOverheadPhi(Math.max(1, Number(e.target.value)))} className="w-28 border border-border bg-panel rounded px-2 py-1" />
+                <input type="number" value={overheadPhi} disabled className="w-28 border border-border bg-panel rounded px-2 py-1 opacity-60" />
               </div>
             </div>
           </div>
@@ -327,7 +340,17 @@ export default function EnergyCapBTCModel() {
           </div>
           <span className="pill text-[11px] whitespace-nowrap">⚡ Competition intensifies as hashrate rises</span>
         </div>
-        {/* (Milestones code unchanged for brevity—uses subsidy math only) */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
+          {milestones.map((m) => (
+            <div key={m.label} className="rounded-2xl border border-border bg-panel p-3">
+              <div className="text-sm font-semibold">{m.label}</div>
+              <div className="text-xs text-fg-subtle">{m.time}</div>
+              <div className="mt-2 text-sm">{m.date ? <>First reached: <b>{fmtDate(m.date)}</b></> : "Not within ~200 years"}</div>
+              {m.date && (<div className="mt-1 text-xs text-fg-subtle">Era: {m.era} • Subsidy ≈ {m.subsidyBTC?.toFixed(6)} BTC/block<br/>Your stack ≈ {m.blocksAtEra?.toFixed(2)} blocks then</div>)}
+              {m.date && (<div className="mt-2 text-[11px]"><span className="text-bitcoin font-semibold">Commanded time:</span> ~{m.time}. <span className="opacity-80">Translation:</span> the network would fight ~{m.time} for your stack.</div>)}
+            </div>
+          ))}
+        </div>
       </section>
 
       {/* Chart */}
