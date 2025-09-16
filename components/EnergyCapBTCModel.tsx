@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState, useCallback } from "react";
+﻿import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, CartesianGrid, Legend } from "recharts";
 import Tooltip from "./Tooltip";
 
@@ -6,6 +6,8 @@ const CONFIG = {
   baseDateISO: "2025-10-01",
   worldElecBaseTWh2024: 30000,
   worldElecGrowth: 0.025,
+  liveRefreshSec: 60,
+  substackUrl: "https://easingismeming.substack.com/p/introducing-the-sid-model",
 } as const;
 
 const KNOWN_ERAS = [
@@ -61,6 +63,9 @@ type HistoryResp = {
 type HistoryErr = { ok: false; error: string };
 
 export default function EnergyCapBTCModel() {
+  // NAV anchor
+  const milestonesRef = useRef<HTMLDivElement | null>(null);
+
   // Primary controls
   const [preset, setPreset] = useState<PresetName>("Base");
   const [year, setYear] = useState(2050);
@@ -69,7 +74,7 @@ export default function EnergyCapBTCModel() {
   const [stackBTC, setStackBTC] = useState(0.01);
   const [showReal, setShowReal] = useState(false);
 
-  // Model dials (user-editable)
+  // Model dials
   const [capSharePct, setCapSharePct] = useState(1.5);
   const [feesPct, setFeesPct] = useState(15);
   const [elecBaseUSDkWh, setElecBaseUSDkWh] = useState(0.06);
@@ -218,9 +223,8 @@ export default function EnergyCapBTCModel() {
     finally { setElecSyncing(false); }
   }
 
-  // Fetch on mount
+  // Fetch on mount, then refresh live cards every 60s
   useEffect(() => {
-    // history first (affects model path)
     (async () => {
       try {
         setHistErr(null);
@@ -236,12 +240,16 @@ export default function EnergyCapBTCModel() {
       }
     })();
 
-    // live cards (UI only unless you click “Use”)
-    syncCpi();
-    syncHashrate();
-    syncDifficulty();
-    syncFees(40);
-    syncElectricity();
+    const doAll = () => {
+      syncCpi();
+      syncHashrate();
+      syncDifficulty();
+      syncFees(40);
+      syncElectricity();
+    };
+    doAll();
+    const id = setInterval(doAll, CONFIG.liveRefreshSec * 1000);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -350,6 +358,18 @@ export default function EnergyCapBTCModel() {
 
   return (
     <div className="mx-auto max-w-6xl p-4 sm:p-6 md:p-8 space-y-6">
+      {/* TOP NAV */}
+      <nav className="flex items-center justify-between py-1">
+        <div className="text-sm">
+          <a href="#milestones" className="underline decoration-bitcoin/70 underline-offset-4 hover:text-bitcoin">
+            Jump to milestones
+          </a>
+        </div>
+        <a href={CONFIG.substackUrl} target="_blank" rel="noreferrer" className="text-sm pill hover:opacity-90">
+          Model explainer (Substack)
+        </a>
+      </nav>
+
       {/* HERO */}
       <header className="space-y-2">
         <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight">
@@ -439,12 +459,6 @@ export default function EnergyCapBTCModel() {
               <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${showReal?"translate-x-5":"translate-x-1"}`} />
             </button>
             <span className="text-sm">Real (CPI)</span>
-            <Tooltip title="Nominal vs Real">
-              <div>
-                <p><b>Nominal:</b> dollars at the date.</p>
-                <p><b>Real:</b> CPI-adjusted back to today’s buying power.</p>
-              </div>
-            </Tooltip>
           </div>
 
           <div className="mt-3 border-t border-border pt-3">
@@ -474,6 +488,41 @@ export default function EnergyCapBTCModel() {
         </div>
       </section>
 
+      {/* 🔥 MILESTONES — make it the hero section */}
+      <section id="milestones" ref={milestonesRef} className="relative p-4 rounded-2xl border-2 border-bitcoin/80 bg-gradient-to-b from-[#120A00] via-[#0F141A] to-[#0F141A] shadow-[0_0_0_4px_rgba(247,147,26,0.08)]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center">
+            <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight">
+              <span className="text-bitcoin">Your stack commands the network</span> — milestones in time
+            </h2>
+            <Tooltip title="Milestones">
+              <div>
+                <p><b>What:</b> First halving eras where your current stack equals 1 block, 1 hour, 1 day, etc.</p>
+                <p><b>Why:</b> As subsidy halves, the same stack commands more blocks (more time).</p>
+              </div>
+            </Tooltip>
+          </div>
+          <button
+            onClick={()=>milestonesRef.current?.scrollIntoView({ behavior:"smooth", block:"start" })}
+            className="pill text-[12px] bg-bitcoin text-black hover:opacity-90 whitespace-nowrap"
+            title="Focus this section"
+          >
+            Focus milestones
+          </button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
+          {milestones.map((m) => (
+            <div key={m.label} className="rounded-2xl border border-border bg-panel p-3">
+              <div className="text-sm font-semibold">{m.label}</div>
+              <div className="text-xs text-fg-subtle">{m.time}</div>
+              <div className="mt-2 text-sm">{m.date ? <>First reached: <b>{fmtDate(m.date)}</b></> : "Not within ~200 years"}</div>
+              {m.date && (<div className="mt-1 text-xs text-fg-subtle">Era: {m.era} • Subsidy ≈ {m.subsidyBTC?.toFixed(6)} BTC/block<br/>Your stack ≈ {m.blocksAtEra?.toFixed(2)} blocks then</div>)}
+              {m.date && (<div className="mt-2 text-[11px]"><span className="text-bitcoin font-semibold">Commanded time:</span> ~{m.time}. <span className="opacity-80">Translation:</span> the network would fight ~{m.time} for your stack.</div>)}
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* SECOND ROW — Live inputs */}
       <section className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {/* Difficulty */}
@@ -484,25 +533,23 @@ export default function EnergyCapBTCModel() {
               <Tooltip title="Difficulty retarget">
                 <div>
                   <p><b>What:</b> Current difficulty and next retarget estimate.</p>
-                  <p><b>Why:</b> Reflects network competitiveness but does not directly set price; it informs your intuition.</p>
+                  <p><b>Why:</b> Reflects network competitiveness. Debug via the JSON link if needed.</p>
                 </div>
               </Tooltip>
             </div>
-            <button onClick={syncDifficulty} disabled={diffSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
-              {diffSyncing ? "Syncing…" : "Sync now"}
-            </button>
+            <div className="flex gap-2">
+              <a className="text-xs underline text-fg-subtle hover:text-bitcoin" href="/api/difficulty" target="_blank" rel="noreferrer">Open raw JSON</a>
+              <button onClick={syncDifficulty} disabled={diffSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
+                {diffSyncing ? "Syncing…" : "Sync now"}
+              </button>
+            </div>
           </div>
           {diffErr ? (
             <div className="text-xs text-red-400">Error: {diffErr}</div>
           ) : (
             <>
-              <div className="text-sm">
-                Current difficulty:{" "}
-                <span className="font-semibold">{diffDifficultyT !== null ? `${diffDifficultyT.toFixed(2)} T` : "—"}</span>
-              </div>
-              <div className="text-xs text-fg-subtle">
-                {diffDifficultyRaw !== null ? `raw: ${diffDifficultyRaw.toExponential(2)}` : ""}
-              </div>
+              <div className="text-sm">Current difficulty: <span className="font-semibold">{diffDifficultyT !== null ? `${diffDifficultyT.toFixed(2)} T` : "—"}</span></div>
+              <div className="text-xs text-fg-subtle">{diffDifficultyRaw !== null ? `raw: ${diffDifficultyRaw.toExponential(2)}` : ""}</div>
               <div className="text-sm">Est. change next retarget: <span className="font-semibold">{diffChangePct !== null ? `${diffChangePct > 0 ? "+" : ""}${diffChangePct.toFixed(2)}%` : "—"}</span></div>
               <div className="text-xs text-fg-subtle">Epoch progress: {diffProgressPct !== null ? `${diffProgressPct.toFixed(1)}%` : "—"} • Blocks into: {diffBlocksInto ?? "—"} • Remaining: {diffBlocksRem ?? "—"}</div>
               <div className="text-xs text-fg-subtle">Next retarget height: {diffNextHeight ?? "—"}</div>
@@ -522,11 +569,12 @@ export default function EnergyCapBTCModel() {
               <Tooltip title="Fee share">
                 <div>
                   <p><b>What:</b> Fees / (fees + subsidy) across recent blocks.</p>
-                  <p><b>Use:</b> Click <i>Use</i> to set the model’s fee % for S_eff.</p>
+                  <p><b>Tip:</b> If you see 0.0, open the JSON to confirm API output.</p>
                 </div>
               </Tooltip>
             </div>
             <div className="flex gap-2">
+              <a className="text-xs underline text-fg-subtle hover:text-bitcoin" href="/api/fees?n=40" target="_blank" rel="noreferrer">Open raw JSON</a>
               <button onClick={() => syncFees(40)} disabled={feeSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
                 {feeSyncing ? "Syncing…" : "Sync now"}
               </button>
@@ -552,14 +600,17 @@ export default function EnergyCapBTCModel() {
               <h3 className="font-semibold">Network heat (live)</h3>
               <Tooltip title="Network heat">
                 <div>
-                  <p><b>What:</b> Aggregate hashrate and a difficulty proxy.</p>
-                  <p><b>Why:</b> Context for competitiveness; model backcast already uses measured history.</p>
+                  <p><b>What:</b> Hashrate & difficulty proxy.</p>
+                  <p><b>Debug:</b> Use the JSON link if values are blank.</p>
                 </div>
               </Tooltip>
             </div>
-            <button onClick={syncHashrate} disabled={hashSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
-              {hashSyncing ? "Syncing…" : "Sync now"}
-            </button>
+            <div className="flex gap-2">
+              <a className="text-xs underline text-fg-subtle hover:text-bitcoin" href="/api/hashrate" target="_blank" rel="noreferrer">Open raw JSON</a>
+              <button onClick={syncHashrate} disabled={hashSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
+                {hashSyncing ? "Syncing…" : "Sync now"}
+              </button>
+            </div>
           </div>
           {hashErr ? (
             <div className="text-xs text-red-400">Error: {hashErr}</div>
@@ -571,168 +622,6 @@ export default function EnergyCapBTCModel() {
               <div className="pill text-[11px] w-fit mt-1">⚡ Higher hashrate ⇒ fiercer competition</div>
             </>
           )}
-        </div>
-      </section>
-
-      {/* THIRD ROW — CPI + Electricity + Dials */}
-      <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* CPI */}
-        <div className="card p-4 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <h3 className="font-semibold">Inflation (CPI, BLS SA)</h3>
-              <Tooltip title="CPI">
-                <div>
-                  <p><b>What:</b> Used to convert nominal to real prices (today’s buying power).</p>
-                  <p><b>Use:</b> Toggle live to set the projection rate to latest YoY.</p>
-                </div>
-              </Tooltip>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={()=>setUseLiveCpi(!useLiveCpi)} className={`px-3 py-1 rounded-full border text-sm transition ${useLiveCpi ? "bg-bitcoin text-black border-transparent shadow" : "bg-panel text-fg border border-border hover:bg-card"}`}>
-                {useLiveCpi ? "Using Live YoY" : "Manual %"}
-              </button>
-              <button onClick={syncCpi} disabled={cpiSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
-                {cpiSyncing ? "Syncing…" : "Sync now"}
-              </button>
-            </div>
-          </div>
-          {cpiError && <div className="text-xs text-red-400">Error: {cpiError}</div>}
-          <div className="text-sm">
-            Latest YoY: <span className="font-semibold">{cpiYoYLatest !== null ? `${cpiYoYLatest.toFixed(2)}%` : "—"}</span>
-            <span className="text-xs text-fg-subtle ml-2">{cpiLatestDate ? fmtDate(cpiLatestDate) : ""}</span>
-          </div>
-          <div className="mt-2">
-            <div className="text-xs text-fg-subtle mb-1">Projection rate used by model</div>
-            <input type="number" step={0.1} value={cpiPct} onChange={(e)=>setCpiPct(Number(e.target.value))} disabled={useLiveCpi && cpiYoYLatest !== null} className="w-32 border border-border bg-panel rounded px-2 py-1 disabled:opacity-60" />
-            <span className="ml-2 text-xs text-fg-subtle">%</span>
-          </div>
-        </div>
-
-        {/* Electricity */}
-        <div className="card p-4 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <h3 className="font-semibold">Electricity price (US Industrial, EIA)</h3>
-              <Tooltip title="Electricity">
-                <div>
-                  <p><b>What:</b> Base $/kWh used for energy cost per block (drifted over time).</p>
-                  <p><b>Use:</b> “Use as base” sets $/kWh; “Use drift” sets the growth rate.</p>
-                </div>
-              </Tooltip>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={syncElectricity} disabled={elecSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
-                {elecSyncing ? "Syncing…" : "Sync now"}
-              </button>
-              <button onClick={() => { if (elecLatestUSD !== null) setElecBaseUSDkWh(Number(elecLatestUSD.toFixed(4))); }} disabled={elecLatestUSD === null} className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-bitcoin text-black border-transparent" title="Set model $/kWh to latest EIA value">
-                Use as base
-              </button>
-            </div>
-          </div>
-          {elecErr ? (
-            <div className="text-xs text-red-400">Error: {elecErr}</div>
-          ) : (
-            <>
-              <div className="text-sm">
-                Latest avg price: <span className="font-semibold">{elecLatestUSD !== null ? `$${elecLatestUSD.toFixed(4)}/kWh` : "—"}</span>
-                <span className="text-xs text-fg-subtle ml-2">{elecLatestPeriod ?? ""}</span>
-              </div>
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                <div className="rounded-xl border border-border bg-panel p-2">
-                  <div className="text-[11px] text-fg-subtle">YoY</div>
-                  <div className="text-sm font-semibold">{elecYoYPct !== null ? `${elecYoYPct.toFixed(2)}%` : "—"}</div>
-                </div>
-                <div className="rounded-xl border border-border bg-panel p-2">
-                  <div className="text-[11px] text-fg-subtle">5-yr CAGR</div>
-                  <div className="text-sm font-semibold">{elecCAGR5 !== null ? `${elecCAGR5.toFixed(2)}%` : "—"}</div>
-                </div>
-                <div className="rounded-xl border border-border bg-panel p-2">
-                  <div className="text-[11px] text-fg-subtle">10-yr CAGR</div>
-                  <div className="text-sm font-semibold">{elecCAGR10 !== null ? `${elecCAGR10.toFixed(2)}%` : "—"}</div>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <label className="text-sm font-medium">Use drift from:</label>
-                <select value={elecDriftChoice} onChange={(e)=>setElecDriftChoice(e.target.value as "YoY"|"5y"|"10y")} className="border border-border bg-panel rounded px-2 py-1 text-sm">
-                  <option value="YoY">YoY</option>
-                  <option value="5y">5-year CAGR</option>
-                  <option value="10y">10-year CAGR</option>
-                </select>
-                <button
-                  onClick={()=>{
-                    const map: Record<"YoY"|"5y"|"10y", number | null> = { YoY: elecYoYPct, "5y": elecCAGR5, "10y": elecCAGR10 };
-                    const v = map[elecDriftChoice];
-                    if (typeof v === "number") setElecDriftPct(Number(v.toFixed(2)));
-                  }}
-                  disabled={
-                    (elecDriftChoice === "YoY"  && elecYoYPct   === null) ||
-                    (elecDriftChoice === "5y"   && elecCAGR5    === null) ||
-                    (elecDriftChoice === "10y"  && elecCAGR10   === null)
-                  }
-                  className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-bitcoin text-black border-transparent"
-                  title="Set model electricity drift % to selected horizon"
-                >
-                  Use drift
-                </button>
-                <span className="text-xs text-fg-subtle">Model uses base × (1+drift)<sup>years</sup></span>
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Quick dials (fees, cap, φ) for convenience */}
-        <div className="card p-4 space-y-3">
-          <label className="text-sm font-medium flex items-center">
-            Quick dials
-            <Tooltip title="Quick dials">
-              <div>
-                <p>These change the model directly.</p>
-                <p><b>Fees %</b> affects S_eff (subsidy + fees).</p>
-              </div>
-            </Tooltip>
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-xs text-fg-subtle mb-1">Fees % (model)</div>
-              <input type="number" min={0} max={100} step={0.1} value={feesPct} onChange={(e)=>setFeesPct(Math.max(0, Number(e.target.value)))} className="w-28 border border-border bg-panel rounded px-2 py-1" />
-            </div>
-            <div>
-              <div className="text-xs text-fg-subtle mb-1">Cap share %</div>
-              <input type="number" min={0} max={100} step={0.1} value={capSharePct} onChange={(e)=>setCapSharePct(Math.max(0, Number(e.target.value)))} className="w-28 border border-border bg-panel rounded px-2 py-1" />
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-fg-subtle mb-1">Overhead φ</div>
-            <input type="number" min={1} step={0.01} value={overheadPhi} onChange={(e)=>setOverheadPhi(Math.max(1, Number(e.target.value)))} className="w-28 border border-border bg-panel rounded px-2 py-1" />
-          </div>
-        </div>
-      </section>
-
-      {/* Milestones */}
-      <section className="card p-4 border-2 border-bitcoin/60">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center">
-            <h3 className="font-semibold mb-1"><span className="text-bitcoin">Your stack commands the network</span> — milestones in time</h3>
-            <Tooltip title="Milestones">
-              <div>
-                <p><b>What:</b> First halving eras where your current stack equals 1 block, 1 hour, 1 day, etc.</p>
-                <p><b>Why:</b> As subsidy halves, the same stack commands more blocks (more time).</p>
-              </div>
-            </Tooltip>
-          </div>
-          <span className="pill text-[11px] whitespace-nowrap">⚡ Competition intensifies as hashrate rises</span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
-          {milestones.map((m) => (
-            <div key={m.label} className="rounded-2xl border border-border bg-panel p-3">
-              <div className="text-sm font-semibold">{m.label}</div>
-              <div className="text-xs text-fg-subtle">{m.time}</div>
-              <div className="mt-2 text-sm">{m.date ? <>First reached: <b>{fmtDate(m.date)}</b></> : "Not within ~200 years"}</div>
-              {m.date && (<div className="mt-1 text-xs text-fg-subtle">Era: {m.era} • Subsidy ≈ {m.subsidyBTC?.toFixed(6)} BTC/block<br/>Your stack ≈ {m.blocksAtEra?.toFixed(2)} blocks then</div>)}
-              {m.date && (<div className="mt-2 text-[11px]"><span className="text-bitcoin font-semibold">Commanded time:</span> ~{m.time}. <span className="opacity-80">Translation:</span> the network would fight ~{m.time} for your stack.</div>)}
-            </div>
-          ))}
         </div>
       </section>
 
@@ -763,7 +652,13 @@ export default function EnergyCapBTCModel() {
         </div>
       </section>
 
-      <section className="text-xs text-fg-subtle">Education only; not financial advice.</section>
+      {/* FOOTER with Substack */}
+      <footer className="pt-2">
+        <a href={CONFIG.substackUrl} target="_blank" rel="noreferrer" className="text-xs underline text-fg-subtle hover:text-bitcoin">
+          Read the SID model explainer on Substack
+        </a>
+        <div className="text-xs text-fg-subtle mt-2">Education only; not financial advice.</div>
+      </footer>
     </div>
   );
 }
