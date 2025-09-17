@@ -1,61 +1,39 @@
 ﻿import type { NextApiRequest, NextApiResponse } from "next";
 
-type Ok = {
+type OK = {
   ok: true;
-  hashrate_ehs: number | null; // ExaHash/s (may be null if source lacks it)
-  difficulty: number | null;   // raw
+  hashrate_ehs: number | null;
+  difficulty: number | null;
   difficulty_trillions: number | null;
   source: string;
   asOfISO: string;
 };
-type Err = { ok: false; error: string };
+type ERR = { ok: false; error: string };
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<Ok | Err>) {
+export default async function handler(
+  _req: NextApiRequest,
+  res: NextApiResponse<OK | ERR>
+) {
   try {
-    // Try mempool.space difficulty-adjustment (doesn't give hashrate reliably but good for diff)
-    const r1 = await fetch("https://mempool.space/api/v1/difficulty-adjustment", { cache: "no-store" });
-    if (r1.ok) {
-      const j = (await r1.json()) as Record<string, unknown>;
-      const diff = typeof j.difficulty === "number" ? j.difficulty : Number(j.difficulty);
-      const difficulty = Number.isFinite(diff) ? Number(diff) : null;
-      const difficulty_trillions = typeof difficulty === "number" ? difficulty / 1e12 : null;
+    const r = await fetch("https://blockchain.info/q/getdifficulty", { cache: "no-store" });
+    const text = await r.text();
+    const difficulty = Number(text);
+    if (!isFinite(difficulty)) throw new Error("Bad difficulty from source");
 
-      return res.status(200).json({
-        ok: true,
-        hashrate_ehs: null,
-        difficulty,
-        difficulty_trillions,
-        source: "mempool.space",
-        asOfISO: new Date().toISOString(),
-      });
-    }
+    // Hashrate ≈ difficulty × 2^32 / 600  (hashes/second)
+    const H = difficulty * Math.pow(2, 32) / 600;
+    const ehs = H / 1e18;
 
-    // Fallback: blockchain.info hashrate (GH/s) and difficulty (raw)
-    const [h2, d2] = await Promise.all([
-      fetch("https://blockchain.info/q/hashrate?cors=true", { cache: "no-store" }),
-      fetch("https://blockchain.info/q/getdifficulty?cors=true", { cache: "no-store" }),
-    ]);
-    if (h2.ok || d2.ok) {
-      const ghText = h2.ok ? await h2.text() : "";
-      const diffText = d2.ok ? await d2.text() : "";
-      const gh = ghText ? Number(ghText) : NaN;            // GigaHash/s
-      const hashrate_ehs = Number.isFinite(gh) ? gh / 1e9 : null; // convert GH/s -> EH/s
-      const difficulty = diffText ? Number(diffText) : null;
-      const difficulty_trillions = typeof difficulty === "number" ? difficulty / 1e12 : null;
-
-      return res.status(200).json({
-        ok: true,
-        hashrate_ehs,
-        difficulty,
-        difficulty_trillions,
-        source: "blockchain.info",
-        asOfISO: new Date().toISOString(),
-      });
-    }
-
-    return res.status(502).json({ ok: false, error: "All sources failed" });
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({
+      ok: true,
+      hashrate_ehs: ehs,
+      difficulty,
+      difficulty_trillions: difficulty / 1e12,
+      source: "computed from blockchain.info difficulty",
+      asOfISO: new Date().toISOString(),
+    });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return res.status(500).json({ ok: false, error: msg });
+    res.status(200).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
   }
 }
