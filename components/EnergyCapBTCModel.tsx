@@ -63,7 +63,6 @@ type HistoryResp = {
 type HistoryErr = { ok: false; error: string };
 
 export default function EnergyCapBTCModel() {
-  // NAV anchor
   const milestonesRef = useRef<HTMLDivElement | null>(null);
 
   // Primary controls
@@ -82,20 +81,20 @@ export default function EnergyCapBTCModel() {
   const [cpiPct, setCpiPct] = useState(2.5);
   const [overheadPhi, setOverheadPhi] = useState(1.15);
 
-  // Historical share (from /api/history)
+  // History
   const [histByYear, setHistByYear] = useState<Record<number, { share:number; twh:number }> | null>(null);
   const [histLastYear, setHistLastYear] = useState<number | null>(null);
   const [histLastShare, setHistLastShare] = useState<number | null>(null);
   const [histErr, setHistErr] = useState<string | null>(null);
 
-  // Live CPI
-  const [useLiveCpi, setUseLiveCpi] = useState(true);
+  // CPI (live)
+  const [useLiveCpi] = useState(true); // value used in syncCpi; no setter needed
   const [cpiYoYLatest, setCpiYoYLatest] = useState<number | null>(null);
   const [cpiLatestDate, setCpiLatestDate] = useState<string | null>(null);
   const [cpiSyncing, setCpiSyncing] = useState(false);
   const [cpiError, setCpiError] = useState<string | null>(null);
 
-  // Live Hashrate
+  // Hashrate (live)
   const [hashSyncing, setHashSyncing] = useState(false);
   const [hashErr, setHashErr] = useState<string | null>(null);
   const [hashEhs, setHashEhs] = useState<number | null>(null);
@@ -103,7 +102,7 @@ export default function EnergyCapBTCModel() {
   const [hashSource, setHashSource] = useState<string | null>(null);
   const [hashAsOf, setHashAsOf] = useState<string | null>(null);
 
-  // Live Difficulty
+  // Difficulty (live)
   const [diffSyncing, setDiffSyncing] = useState(false);
   const [diffErr, setDiffErr] = useState<string | null>(null);
   const [diffDifficultyRaw, setDiffDifficultyRaw] = useState<number | null>(null);
@@ -115,14 +114,14 @@ export default function EnergyCapBTCModel() {
   const [diffNextHeight, setDiffNextHeight] = useState<number | null>(null);
   const [diffETAISO, setDiffETAISO] = useState<string | null>(null);
 
-  // Live Fee share
+  // Fees (live)
   const [feeSyncing, setFeeSyncing] = useState(false);
   const [feeErr, setFeeErr] = useState<string | null>(null);
   const [feeSharePctLive, setFeeSharePctLive] = useState<number | null>(null);
   const [feeSample, setFeeSample] = useState<number | null>(null);
   const [feeAsOf, setFeeAsOf] = useState<string | null>(null);
 
-  // Live Electricity (EIA)
+  // Electricity (live)
   const [elecSyncing, setElecSyncing] = useState(false);
   const [elecErr, setElecErr] = useState<string | null>(null);
   const [elecLatestUSD, setElecLatestUSD] = useState<number | null>(null);
@@ -137,7 +136,7 @@ export default function EnergyCapBTCModel() {
     return `${year}-${mm}-${dd}`;
   }, [year, month, day]);
 
-  // ---- Live fetchers ----
+  // Live fetchers
   async function syncCpi() {
     try {
       setCpiSyncing(true); setCpiError(null);
@@ -223,7 +222,7 @@ export default function EnergyCapBTCModel() {
     finally { setElecSyncing(false); }
   }
 
-  // Fetch on mount, then refresh live cards every 60s
+  // On mount: history + live, then refresh live every 60s
   useEffect(() => {
     (async () => {
       try {
@@ -277,19 +276,18 @@ export default function EnergyCapBTCModel() {
     return Math.pow(1 + cpiPct/100, years);
   }, [cpiPct]);
 
-  // Anchored adoption ramp from last historical share (smooth forward)
+  // Anchored adoption ramp from last historical share
   const anchoredAdoption = useCallback((iso: string, p: PresetName) => {
     const y = new Date(iso).getUTCFullYear();
     const util = PRESETS[p].capUtilMultiplier;
     const capShareFraction = (capSharePct/100) * util;
 
     const baseYear = (histLastYear ?? new Date(CONFIG.baseDateISO).getUTCFullYear());
-    the:
     const anchorShare = (histLastShare !== null && isFinite(histLastShare)) ? histLastShare : 0.001;
     const a0Raw = capShareFraction > 0 ? (anchorShare / capShareFraction) : 0.01;
     const a0 = Math.max(ADOPTION.floor + 1e-6, Math.min(1 - 1e-6, a0Raw));
 
-    const y0 = baseYear - (1/ADOPTION.steepness) * Math.log(1/a0 - 1); // passes through (baseYear, a0)
+    const y0 = baseYear - (1/ADOPTION.steepness) * Math.log(1/a0 - 1);
     const x = 1 / (1 + Math.exp(-ADOPTION.steepness * (y - y0)));
     return Math.max(ADOPTION.floor, Math.min(1, x));
   }, [capSharePct, histLastYear, histLastShare]);
@@ -321,7 +319,7 @@ export default function EnergyCapBTCModel() {
     return { S, S_eff, fairPerBTC, fairPerBTCReal, floorPerBTC, share };
   }, [feesPct, overheadPhi, capSharePct, histByYear, anchoredAdoption, worldElectricityTWh, electricityPriceUSDkWh, cpiFactor, subsidyOnDate]);
 
-  // Milestones: first halving era where stack >= threshold blocks
+  // Milestones
   const milestones = useMemo(() => {
     const feeMult = 1 + feesPct/100;
     return THRESHOLDS_BLOCKS.map((t) => {
@@ -506,17 +504,25 @@ export default function EnergyCapBTCModel() {
           <button
             onClick={()=>milestonesRef.current?.scrollIntoView({ behavior:"smooth", block:"start" })}
             className="pill text-[12px] bg-bitcoin text-black hover:opacity-90 whitespace-nowrap"
-            title="Focus this section"
+            title="Focus milestones"
           >
             Focus milestones
           </button>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 mt-3">
-          {/* cards rendered below in the .map */}
+          {milestones.map((m) => (
+            <div key={m.label} className="rounded-2xl border border-border bg-panel p-3">
+              <div className="text-sm font-semibold">{m.label}</div>
+              <div className="text-xs text-fg-subtle">{m.time}</div>
+              <div className="mt-2 text-sm">{m.date ? <>First reached: <b>{fmtDate(m.date)}</b></> : "Not within ~200 years"}</div>
+              {m.date && (<div className="mt-1 text-xs text-fg-subtle">Era: {m.era} • Subsidy ≈ {m.subsidyBTC?.toFixed(6)} BTC/block<br/>Your stack ≈ {m.blocksAtEra?.toFixed(2)} blocks then</div>)}
+              {m.date && (<div className="mt-2 text-[11px]"><span className="text-bitcoin font-semibold">Commanded time:</span> ~{m.time}. <span className="opacity-80">Translation:</span> the network would fight ~{m.time} for your stack.</div>)}
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* SECOND ROW — Live inputs */}
+      {/* SECOND ROW — Live network */}
       <section className="grid grid-cols-1 lg:grid-cols-4 gap-4">
         {/* Difficulty */}
         <div className="card p-4 space-y-2 lg:col-span-2">
@@ -613,6 +619,93 @@ export default function EnergyCapBTCModel() {
               <div className="text-xs text-fg-subtle">Difficulty proxy: {hashDiffT !== null ? `${hashDiffT.toFixed(2)} T` : "—"}</div>
               <div className="text-[11px] text-fg-subtle">{hashSource ? `Source: ${hashSource}` : ""} {hashAsOf ? `• ${fmtDate(hashAsOf)} ${fmtTime(hashAsOf)}` : ""}</div>
               <div className="pill text-[11px] w-fit mt-1">⚡ Higher hashrate ⇒ fiercer competition</div>
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* THIRD ROW — Live macro (CPI + Electricity) */}
+      <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* CPI */}
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <h3 className="font-semibold">CPI (BLS SA — live)</h3>
+              <Tooltip title="CPI (live)">
+                <div>
+                  <p><b>What:</b> Latest YoY CPI (seasonally adjusted).</p>
+                  <p><b>Use:</b> Apply to the model’s “Real” adjustment.</p>
+                </div>
+              </Tooltip>
+            </div>
+            <div className="flex gap-2">
+              <a className="text-xs underline text-fg-subtle hover:text-bitcoin" href="/api/cpi" target="_blank" rel="noreferrer">Open raw JSON</a>
+              <button onClick={syncCpi} disabled={cpiSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
+                {cpiSyncing ? "Syncing…" : "Sync now"}
+              </button>
+              <button onClick={() => { if (cpiYoYLatest !== null) setCpiPct(Number(cpiYoYLatest.toFixed(2))); }} disabled={cpiYoYLatest === null} className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-bitcoin text-black border-transparent" title="Set model CPI% to live YoY">
+                Use
+              </button>
+            </div>
+          </div>
+          {cpiError ? (
+            <div className="text-xs text-red-400">Error: {cpiError}</div>
+          ) : (
+            <>
+              <div className="text-2xl font-extrabold tracking-tight">{cpiYoYLatest !== null ? `${cpiYoYLatest.toFixed(2)}%` : "—"}</div>
+              <div className="text-xs text-fg-subtle">{cpiLatestDate ? `As of ${fmtDate(cpiLatestDate)}` : ""}</div>
+            </>
+          )}
+        </div>
+
+        {/* Electricity */}
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <h3 className="font-semibold">US Electricity (EIA — live)</h3>
+              <Tooltip title="Electricity (live)">
+                <div>
+                  <p><b>What:</b> Residential average price (USD/kWh) + YoY & long-run CAGRs.</p>
+                  <p><b>Use:</b> Set the base USD/kWh and choose a drift for future pricing.</p>
+                </div>
+              </Tooltip>
+            </div>
+            <div className="flex gap-2">
+              <a className="text-xs underline text-fg-subtle hover:text-bitcoin" href="/api/electricity" target="_blank" rel="noreferrer">Open raw JSON</a>
+              <button onClick={syncElectricity} disabled={elecSyncing} className="px-3 py-1 rounded-full border border-border bg-panel hover:bg-card text-sm disabled:opacity-60">
+                {elecSyncing ? "Syncing…" : "Sync now"}
+              </button>
+            </div>
+          </div>
+          {elecErr ? (
+            <div className="text-xs text-red-400">Error: {elecErr}</div>
+          ) : (
+            <>
+              <div className="text-sm">Latest: <span className="font-semibold">{elecLatestUSD !== null ? `$${elecLatestUSD.toFixed(3)}/kWh` : "—"}</span> {elecLatestPeriod ? <span className="text-fg-subtle">({elecLatestPeriod})</span> : null}</div>
+              <div className="text-xs text-fg-subtle">YoY: {elecYoYPct !== null ? `${elecYoYPct.toFixed(2)}%` : "—"} • 5y CAGR: {elecCAGR5 !== null ? `${elecCAGR5.toFixed(2)}%` : "—"} • 10y CAGR: {elecCAGR10 !== null ? `${elecCAGR10.toFixed(2)}%` : "—"}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button onClick={()=>{ if (elecLatestUSD !== null) setElecBaseUSDkWh(elecLatestUSD); }} disabled={elecLatestUSD === null} className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-panel hover:bg-card">
+                  Use price as base
+                </button>
+                <select value={elecDriftChoice} onChange={(e)=>setElecDriftChoice(e.target.value as "YoY"|"5y"|"10y")} className="border border-border bg-panel rounded px-2 py-1 text-sm">
+                  <option value="YoY">Drift = YoY</option>
+                  <option value="5y">Drift = 5y CAGR</option>
+                  <option value="10y">Drift = 10y CAGR</option>
+                </select>
+                <button
+                  onClick={()=>{
+                    const map: Record<string, number | null> = {
+                      "YoY": elecYoYPct, "5y": elecCAGR5, "10y": elecCAGR10
+                    };
+                    const v = map[elecDriftChoice];
+                    if (typeof v === "number") setElecDriftPct(Number(v.toFixed(2)));
+                  }}
+                  disabled={ (elecDriftChoice==="YoY" && elecYoYPct===null) || (elecDriftChoice==="5y" && elecCAGR5===null) || (elecDriftChoice==="10y" && elecCAGR10===null) }
+                  className="px-3 py-1 rounded-full border text-sm transition disabled:opacity-60 bg-bitcoin text-black border-transparent"
+                >
+                  Apply drift
+                </button>
+              </div>
             </>
           )}
         </div>
